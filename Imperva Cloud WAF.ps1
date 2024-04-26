@@ -3,7 +3,7 @@
 #
 # CCamacho Template Driver Version: 202212281725
 #
-$Script:AdaptableAppVer = '202402191105'
+$Script:AdaptableAppVer = '202403280054'
 $Script:AdaptableAppDrv = 'Imperva Cloud WAF'
 
 # Global driver configurations that can't be setup any other way
@@ -105,8 +105,7 @@ function Install-Certificate
 
     try {
         $siteInfo=Invoke-ImpervaRestMethod -General $General -Method Post -Uri $apiUrl -Body $apiBody
-    }
-    catch {
+    } catch {
         Write-VenDebugLog "Install Failure: $($_)"
         throw("Install Failure: $($_)")
     }
@@ -507,6 +506,12 @@ function Invoke-ImpervaRestMethod
 
         # return response upon success, otherwise retry
         if ($response.res -eq 0) { return $response }
+
+        # error 4205 indicates that the site is not configured for SSL - throw an error
+        if ($response.res -eq 4205) {
+            $fatal = "SITE NOT CONFIGURED FOR SSL (Error: 4205)"
+            $fatal | Write-VenDebugLog -ThrowException
+        }
 
         # error 9413 indicates that the site does not exist - throw an error
         if ($response.res -eq 9413) {
