@@ -3,7 +3,7 @@
 #
 # CCamacho Template Driver Version: 202212281725
 #
-$Script:AdaptableAppVer = '202403280054'
+$Script:AdaptableAppVer = '202405141224'
 $Script:AdaptableAppDrv = 'Imperva Cloud WAF'
 
 # Global driver configurations that can't be setup any other way
@@ -274,7 +274,7 @@ function Discover-Certificates
         Uri     = 'https://my.imperva.com/api/prov/v1/sites/list'
     }
 
-    Write-VenDebugLog "General: $($General | ConvertTo-Json | Out-String)"
+#    Write-VenDebugLog "General: $($General | ConvertTo-Json | Out-String)"
 
     if (($General.HostAddress -eq '') -or ($General.HostAddress -eq '*')) {
         $wafAccount = '*'
@@ -507,6 +507,9 @@ function Invoke-ImpervaRestMethod
         # return response upon success, otherwise retry
         if ($response.res -eq 0) { return $response }
 
+        # error 9415 is "Operation not allowed" - return immediately
+        if ($response.res -eq 9415) { return $response }
+
         # error 4205 indicates that the site is not configured for SSL - throw an error
         if ($response.res -eq 4205) {
             $fatal = "SITE NOT CONFIGURED FOR SSL (Error: 4205)"
@@ -521,7 +524,12 @@ function Invoke-ImpervaRestMethod
 
         $i++
         $wait = Get-Random -Minimum ($i+1) -Maximum ($i*3)
-        Write-VenDebugLog "Attempt #$($i) failed ($($response.debug_info.Error)) - sleeping for $($wait) seconds"
+        if ($response.debug_info.Error) {
+            $error_message = $response.debug_info.Error
+        } else {
+            $error_message = $response.debug_info.problem
+        }
+        Write-VenDebugLog "Attempt #$($i) failed ($($error_message)) - sleeping for $($wait) seconds"
         Start-Sleep -Seconds $wait
     } while ($i -lt $Attempts)
 
@@ -757,9 +765,15 @@ function Find-CertInVenafi
         [string]$Thumbprint
     )
 
+    Write-VenDebugLog "Called by $((Get-PSCallStack)[1].Command)"
+
     # Create Venafi credential object
-    $vUser = $General.AuxUser
-    $vPass = ConvertTo-SecureString $General.AuxPass -AsPlainText -Force
+    $vUser = $General.AuxUser.Trim()
+    if (-not $vUser) {
+        Write-VenDebugLog "No auxilliary user defined - cannot access Venafi API"
+        return
+    }
+    $vPass = ConvertTo-SecureString $General.AuxPass.Trim() -AsPlainText -Force
     $vCred = New-Object System.Management.Automation.PSCredential($vUser, $vPass)
 
     # Venafi API hostname defaults to the FQDN of the localhost
@@ -781,12 +795,20 @@ function Find-CertInVenafi
         ClientId = 'imperva'
         Scope = @{ certificate='manage'; configuration='manage'; restricted='manage' }
     }
-    $vSession = New-VenafiSession @vParms -PassThru
+    try {
+        $vSession = New-VenafiSession @vParms -PassThru
+        if (-not $vSession) {
+            throw "VenafiSession is NULL"
+        }
+    } catch {
+        Write-VenDebugLog "Venafi Login Failure: $($_)"
+        return
+    }
     Write-VenDebugLog "Searching the vault for SN: $($SerialNumber)"
     try {
         $VaultID = Find-TppVaultId -Attribute @{'Serial'=$SerialNumber} -VenafiSession $vSession
     } catch {
-        Write-VenDebugLog "Vault ID Failure: $($_)"
+        Write-VenDebugLog "Vault ID Lookup Failure: $($_)"
     }
 
     if (-not $VaultID) {
