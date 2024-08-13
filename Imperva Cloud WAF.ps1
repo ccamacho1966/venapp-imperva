@@ -3,7 +3,7 @@
 #
 # CCamacho Template Driver Version: 202212281725
 #
-$Script:AdaptableAppVer = '202405141224'
+$Script:AdaptableAppVer = '202408131645'
 $Script:AdaptableAppDrv = 'Imperva Cloud WAF'
 
 # Global driver configurations that can't be setup any other way
@@ -94,25 +94,47 @@ function Install-Certificate
     $siteId =$General.VarText1
 
     $rawCert="$($Specific.CertPem)$($Specific.ChainPem)"
-    $rawKey ="$($Specific.PrivKeyPem)"
+    $rawKey ="$($Specific.PrivKeyPemEncrypted)"
 
-    $certB64=[Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($rawCert.Replace("`r`n","`n")))
-    $keyB64 =[Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($rawKey.Replace("`r`n","`n")))
+    $certB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($rawCert.Replace("`r`n","`n")))
+    $keyB64  = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($rawKey.Replace("`r`n","`n")))
 
-    $apiUrl ="https://my.imperva.com/api/prov/v1/sites/customCertificate/upload"
+    # v1 API - deprecated 1-Nov-2024
+    # $apiUrl ="https://my.imperva.com/api/prov/v1/sites/customCertificate/upload"
 
-    $apiBody=@{'site_id'=$siteId; 'certificate'=$certB64; 'private_key'=$keyB64}
+    # v2 API - custom certificate management
+    $apiUrl  = "https://my.imperva.com/api/prov/v2/sites/$($siteId)/customCertificate"
+
+    Add-Type -AssemblyName System.Security
+    $X509Certificate  = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new([Convert]::FromBase64String($certB64))
+    $AuthTypeFullName = $X509Certificate.SignatureAlgorithm.FriendlyName
+    Write-VenDebugLog "Certificate Signature Algorithm is $($AuthTypeFullName) ($($X509Certificate.SignatureAlgorithm.Value))"
+    if ($AuthTypeFullName -like '*RSA*') {
+        $X509AuthType = 'RSA'
+    } else {
+        $X509AuthType = 'ECC'
+    }
+    Write-VenDebugLog "Setting Imperva custom certificate auth-type to '$($X509AuthType)'"
+
+    $apiBody = @{
+        'certificate' = $certB64
+        'private_key' = $keyB64
+        'passphrase'  = $Specific.EncryptPass
+        'auth_type'   = $X509AuthType # 'RSA or ECC'
+    }
 
     try {
-        $siteInfo=Invoke-ImpervaRestMethod -General $General -Method Post -Uri $apiUrl -Body $apiBody
+        $siteInfo = Invoke-ImpervaRestMethod -General $General -Method Put -Uri $apiUrl -Body ($apiBody|ConvertTo-Json -Depth 9)
     } catch {
         Write-VenDebugLog "Install Failure: $($_)"
+        Write-VenDebugLog "$($_|ConvertTo-Json -Depth 9 -Compress)"
         throw("Install Failure: $($_)")
     }
 
     if ($siteInfo.res -ne 0) {
-        $apiError = "API error $($siteInfo.res): $($siteInfo.debug_info.Error)"
+        $apiError = "API error $($siteInfo.res): $($siteInfo.res_message)"
         Write-VenDebugLog $apiError
+        Write-VenDebugLog "$($siteInfo|ConvertTo-Json -Depth 9 -Compress)"
         if ($siteInfo.res -eq 3015) {
             Write-VenDebugLog "Temporary Error - Returning control to Venafi (Resume Later)"
             return @{ Result="ResumeLater"; }
@@ -120,9 +142,6 @@ function Install-Certificate
         Write-VenDebugLog "Install FAILED - Returning control to Venafi"
         throw $apiError
     }
-
-    $certExpires=Convert-ImpervaTimestamp $siteInfo.debug_info.details.expirationDate
-    Write-VenDebugLog "Certificate Valid Until $($certExpires)"
 
     Write-VenDebugLog "Certificate Installed - Returning control to Venafi"
     return @{ Result="Success"; }
@@ -189,8 +208,7 @@ function Extract-Certificate
 
     try {
         $siteInfo=Invoke-ImpervaRestMethod -General $General -Method Post -Uri $apiUrl -Body $apiBody
-    }
-    catch {
+    } catch {
         Write-VenDebugLog "Failed to retrieve site status: $($_)"
         throw("Failed to retrieve site status: $($_)")
     }
